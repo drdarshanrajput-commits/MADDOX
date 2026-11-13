@@ -22,7 +22,7 @@ app = Flask(__name__)
 # ---- Settings ----
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 HF_API_TOKEN = os.environ.get("HF_API_TOKEN")  # optional, for video generation
-MODEL_NAME = "llama-3.3-70b-versatile"
+MODEL_NAME = "openai/gpt-oss-120b"
 VOICE = "en-US-GuyNeural"
 ASSISTANT_NAME = "Maddox"
 CREATOR_NAME = "Aryan Singh Rajput"
