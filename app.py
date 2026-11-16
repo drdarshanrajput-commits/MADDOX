@@ -1,71 +1,76 @@
-"""
-Maddox v2 - Jarvis-style AI assistant, hosted online, free.
-Image generation, (free, limited) video generation, persistent memory,
-creator credit, WhatsApp draft + restaurant/Maps handoff.
-"""
+"""RIFT - personal AI assistant web application."""
 
 import os
 import io
 import re
 import json
 import asyncio
-import time
 import urllib.parse
+from pathlib import Path
 
 from flask import Flask, request, jsonify, send_file, render_template, send_from_directory
 from groq import Groq
 import edge_tts
-import requests
+
+BASE_DIR = Path(__file__).resolve().parent
+STATIC_DIR = BASE_DIR / "static"
+MEMORY_FILE = BASE_DIR / "memory.json"
 
 app = Flask(__name__)
+app.config["MAX_CONTENT_LENGTH"] = 2 * 1024 * 1024  # 2 MB JSON request limit
 
-# ---- Settings ----
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
-HF_API_TOKEN = os.environ.get("HF_API_TOKEN")  # optional, for video generation
 MODEL_NAME = "openai/gpt-oss-120b"
 VOICE = "en-US-GuyNeural"
-ASSISTANT_NAME = "Maddox"
+ASSISTANT_NAME = "RIFT"
 CREATOR_NAME = "Aryan Singh Rajput"
-MEMORY_FILE = "memory.json"
-MAX_MEMORY_TURNS = 30  # keeps file small; this is shared memory for whoever uses the link
+MAX_MEMORY_TURNS = 30
 
 SYSTEM_PROMPT = (
-    f"You are {ASSISTANT_NAME}, a witty, composed, highly capable personal AI "
-    f"assistant in the style of a sci-fi companion AI. Keep answers clear, "
-    f"helpful, and conversational — a few sentences unless the user asks for "
-    f"more detail. Address the user directly and occasionally add a touch of "
-    f"dry humor, but always stay useful and to the point. You were created by "
-    f"{CREATOR_NAME}. If asked who made you, who created you, or who your "
-    f"developer is, always answer that {CREATOR_NAME} made you."
+    f"You are {ASSISTANT_NAME}, a capable, composed, friendly personal AI assistant. "
+    "Give accurate, useful answers. Explain difficult topics clearly, distinguish facts "
+    "from uncertainty, and never pretend to have performed an action you did not perform. "
+    "You can help with ideas, writing, learning, planning, and technical problem-solving. "
+    f"Your creator is {CREATOR_NAME}. If asked who Aryan Singh Rajput is, or who created "
+    f"you, explain that {CREATOR_NAME} is the creator of RIFT. Do not invent claims about "
+    "his public achievements or fame."
 )
-# --------------------
 
 client = Groq(api_key=GROQ_API_KEY) if GROQ_API_KEY else None
 
 CREATOR_PATTERN = re.compile(
-    r"\b(who\s+(made|created|built|developed|programmed)\s+you|"
-    r"who('?s| is)\s+your\s+(creator|developer|maker)|your\s+creator)\b",
+    r"\b(?:who\s+(?:made|created|built|developed|programmed)\s+(?:you|rift)|"
+    r"who\s+(?:is|was)\s+(?:aryan(?:\s+singh)?(?:\s+rajput)?|your\s+creator)|"
+    r"who(?:'s|\s+is)\s+your\s+(?:creator|developer|maker)|"
+    r"your\s+creator)\b",
+    re.IGNORECASE,
+)
+IMAGE_INTENT_PATTERN = re.compile(
+    r"\b(?:generate|create|make|draw|paint|design)\s+(?:me\s+)?"
+    r"(?:an?\s+)?(?:image|picture|photo|illustration|artwork|drawing)\s+"
+    r"(?:of\s+)?(.+)$",
     re.IGNORECASE,
 )
 PHONE_PATTERN = re.compile(r"\b(\+?\d[\d\s-]{7,}\d)\b")
 
 
 def load_memory():
-    if os.path.exists(MEMORY_FILE):
-        try:
-            with open(MEMORY_FILE, "r") as f:
-                return json.load(f)
-        except Exception:
-            return []
+    try:
+        if MEMORY_FILE.exists():
+            with MEMORY_FILE.open("r", encoding="utf-8") as handle:
+                data = json.load(handle)
+                return data if isinstance(data, list) else []
+    except (OSError, json.JSONDecodeError):
+        pass
     return []
 
 
 def save_memory(history):
     try:
-        with open(MEMORY_FILE, "w") as f:
-            json.dump(history[-MAX_MEMORY_TURNS:], f)
-    except Exception:
-        pass
+        with MEMORY_FILE.open("w", encoding="utf-8") as handle:
+            json.dump(history[-MAX_MEMORY_TURNS:], handle, ensure_ascii=False)
+    except OSError:
+        app.logger.exception("Could not save conversation memory")
 
 
 def detect_action(question: str):
@@ -73,7 +78,6 @@ def detect_action(question: str):
     if "whatsapp" in q:
         phone_match = PHONE_PATTERN.search(question)
         number = re.sub(r"[\s-]", "", phone_match.group(1)) if phone_match else ""
-        # try to pull a message after "saying" / "that says" / ":"
         msg_match = re.search(r"(?:saying|says?|that says|:)\s*(.+)$", question, re.IGNORECASE)
         message = msg_match.group(1).strip() if msg_match else question
         return {"type": "whatsapp", "number": number, "message": message}
@@ -90,127 +94,125 @@ def home():
 @app.route("/manifest.json")
 def manifest():
     return jsonify({
-        "name": ASSISTANT_NAME,
-        "short_name": ASSISTANT_NAME,
+        "name": "RIFT — Personal AI",
+        "short_name": "RIFT",
+        "description": "Your personal AI system",
         "start_url": "/",
+        "scope": "/",
         "display": "standalone",
-        "background_color": "#0f1419",
-        "theme_color": "#0f1419",
+        "background_color": "#050b16",
+        "theme_color": "#071426",
         "icons": [
-            {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png"},
-            {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png"},
+            {"src": "/static/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any"},
+            {"src": "/static/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any maskable"},
         ],
     })
 
 
 @app.route("/sw.js")
 def service_worker():
-    js = "self.addEventListener('fetch', function(e) {});"
-    return app.response_class(js, mimetype="application/javascript")
+    js = "self.addEventListener('fetch', function(event) {});"
+    response = app.response_class(js, mimetype="application/javascript")
+    response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
+@app.route("/favicon.ico")
+def favicon():
+    return send_from_directory(STATIC_DIR, "favicon.ico", mimetype="image/vnd.microsoft.icon")
 
 
 @app.route("/static/<path:filename>")
 def static_files(filename):
-    return send_from_directory("static", filename)
+    return send_from_directory(STATIC_DIR, filename)
 
 
 @app.route("/ask", methods=["POST"])
 def ask():
-    if not client:
-        return jsonify({"error": "Server is missing its GROQ_API_KEY setting."}), 500
-
-    data = request.get_json(force=True)
+    data = request.get_json(silent=True) or {}
     question = (data.get("question") or "").strip()
     if not question:
-        return jsonify({"error": "No question given."}), 400
+        return jsonify({"error": "Please enter a message."}), 400
+    if len(question) > 12000:
+        return jsonify({"error": "That message is too long. Please shorten it."}), 413
 
-    # Deterministic creator answer, no API call needed
+    image_match = IMAGE_INTENT_PATTERN.search(question)
+    if image_match and image_match.group(1).strip():
+        prompt = image_match.group(1).strip().rstrip(".!?")
+        return jsonify({
+            "answer": "Preparing your image now. The image service may take a little time to respond.",
+            "action": {"type": "generate_image", "prompt": prompt},
+        })
+
     if CREATOR_PATTERN.search(question):
-        answer = f"I was created by {CREATOR_NAME}."
+        answer = (
+            f"Aryan Singh Rajput is the creator behind my circuits — the person who "
+            f"imagined and developed RIFT. Without him, there would be no RIFT."
+        )
         history = load_memory()
-        history.append({"role": "user", "content": question})
-        history.append({"role": "assistant", "content": answer})
+        history.extend([{"role": "user", "content": question}, {"role": "assistant", "content": answer}])
         save_memory(history)
         return jsonify({"answer": answer, "action": None})
 
-    action = detect_action(question)
+    if not client:
+        return jsonify({"error": "The server is missing its GROQ_API_KEY setting."}), 500
 
     history = load_memory()
     messages = [{"role": "system", "content": SYSTEM_PROMPT}]
-    messages.extend(history[-12:])  # recent context
+    messages.extend(history[-12:])
     messages.append({"role": "user", "content": question})
 
     try:
         completion = client.chat.completions.create(model=MODEL_NAME, messages=messages)
-        answer = completion.choices[0].message.content.strip()
-    except Exception as e:
-        return jsonify({"error": f"Brain error: {e}"}), 500
+        answer = (completion.choices[0].message.content or "").strip()
+        if not answer:
+            answer = "I couldn't form a response just now. Please try again."
+    except Exception:
+        app.logger.exception("Groq request failed")
+        return jsonify({"error": "RIFT couldn't reach its AI model. Please try again shortly."}), 502
 
-    history.append({"role": "user", "content": question})
-    history.append({"role": "assistant", "content": answer})
+    history.extend([{"role": "user", "content": question}, {"role": "assistant", "content": answer}])
     save_memory(history)
-
-    return jsonify({"answer": answer, "action": action})
+    return jsonify({"answer": answer, "action": detect_action(question)})
 
 
 @app.route("/speak", methods=["POST"])
 def speak():
-    data = request.get_json(force=True)
+    data = request.get_json(silent=True) or {}
     text = (data.get("text") or "").strip()
     if not text:
         return jsonify({"error": "No text given."}), 400
+    if len(text) > 5000:
+        return jsonify({"error": "The speech text is too long."}), 413
     try:
         audio_bytes = asyncio.run(_synthesize(text))
-    except Exception as e:
-        return jsonify({"error": f"Voice error: {e}"}), 500
-    return send_file(io.BytesIO(audio_bytes), mimetype="audio/mpeg", download_name="speech.mp3")
+    except Exception:
+        app.logger.exception("Text-to-speech failed")
+        return jsonify({"error": "Voice service is temporarily unavailable."}), 502
+    return send_file(io.BytesIO(audio_bytes), mimetype="audio/mpeg", download_name="rift-speech.mp3")
 
 
 async def _synthesize(text: str) -> bytes:
     communicate = edge_tts.Communicate(text, VOICE)
-    buf = io.BytesIO()
+    buffer = io.BytesIO()
     async for chunk in communicate.stream():
         if chunk["type"] == "audio":
-            buf.write(chunk["data"])
-    return buf.getvalue()
+            buffer.write(chunk["data"])
+    return buffer.getvalue()
 
 
 @app.route("/generate-image", methods=["POST"])
 def generate_image():
-    data = request.get_json(force=True)
+    data = request.get_json(silent=True) or {}
     prompt = (data.get("prompt") or "").strip()
     if not prompt:
-        return jsonify({"error": "No prompt given."}), 400
+        return jsonify({"error": "Please describe the image you want."}), 400
+    if len(prompt) > 1500:
+        return jsonify({"error": "Please shorten the image description."}), 413
     encoded = urllib.parse.quote(prompt)
-    # Pollinations.ai - free, no API key. Browser loads this URL directly.
-    url = f"https://image.pollinations.ai/prompt/{encoded}?width=768&height=768&nologo=true"
+    # Pollinations is an external service; availability and terms are controlled by its provider.
+    url = f"https://image.pollinations.ai/prompt/{encoded}?width=1024&height=1024&nologo=true"
     return jsonify({"url": url})
-
-
-@app.route("/generate-video", methods=["POST"])
-def generate_video():
-    if not HF_API_TOKEN:
-        return jsonify({"error": "Video generation needs a free Hugging Face token set up first."}), 500
-
-    data = request.get_json(force=True)
-    prompt = (data.get("prompt") or "").strip()
-    if not prompt:
-        return jsonify({"error": "No prompt given."}), 400
-
-    hf_url = "https://api-inference.huggingface.co/models/damo-vilab/text-to-video-ms-1.7b"
-    headers = {"Authorization": f"Bearer {HF_API_TOKEN}"}
-
-    try:
-        resp = requests.post(hf_url, headers=headers, json={"inputs": prompt}, timeout=120)
-    except Exception as e:
-        return jsonify({"error": f"Video service error: {e}"}), 500
-
-    if resp.status_code == 503:
-        return jsonify({"error": "The free video model is warming up. Wait ~30 seconds and try again."}), 503
-    if resp.status_code != 200:
-        return jsonify({"error": f"Video generation failed ({resp.status_code}). The free model may be busy."}), 500
-
-    return send_file(io.BytesIO(resp.content), mimetype="video/mp4", download_name="maddox-video.mp4")
 
 
 if __name__ == "__main__":
